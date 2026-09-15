@@ -1,0 +1,15 @@
+node_modules
+vendor
+.agents/skills/caostack
+.agents/skills/poteto-mode
+.env*
+!.env.example
+.eve
+.vercel
+.next
+.output
+.nitro
+dist
+out
+.DS_Store
+*.tsbuildinfo
