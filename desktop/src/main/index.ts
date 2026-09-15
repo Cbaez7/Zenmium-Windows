@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
-import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, WebContentsView } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, net, safeStorage, WebContentsView } from "electron";
 import { z } from "zod";
 import {
   type BrowserNotification,
@@ -159,7 +159,7 @@ async function attachWorkspaceSession(entry: WorkspaceSession): Promise<void> {
   permissions.attach(entry.profileId, entry.session);
   downloads.attach(entry.profileId, entry.spaceId, entry.session);
   // Filter-list hydration is deliberately not on the first-page critical path.
-  void blocking.attach(entry.profileId, entry.session).catch(() => undefined);
+  blocking.attach(entry.profileId, entry.session);
   const result = await profileHosts.get(entry.profileId)!.host.boot();
   if (!result.ok) {
     events.emit(EXTENSION_IPC.progress, {
@@ -676,7 +676,7 @@ function initializeWindowServices(): void {
     trustedChrome: (wc) => chrome?.owns(wc) ?? false,
     changed: () => native?.changed(),
   });
-  blocking = new BrowserBlocking(userDataDir, () => native?.changed());
+  blocking = new BrowserBlocking(userDataDir, () => native?.changed(), (input, init) => net.fetch(input, init));
   downloads = new BrowserDownloads(app.getPath("userData"), (completed) => {
     if (chrome) chrome.broadcast(CHROME_IPC.event, chrome.snapshot());
     if (completed?.state === "completed") {

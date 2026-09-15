@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { Session } from "electron";
 import type { ProtectionState } from "../shared/browser-native";
+import { deferFilterListHydration, type FilterListFetch } from "./filter-list-hydration";
 import { JsonStore } from "./state-store";
 
 type Settings = Record<string, { enabled: boolean; exceptions: string[] }>;
@@ -11,6 +12,9 @@ const MAX_AGE = 7 * 24 * 60 * 60 * 1000;
 
 /** Owns the session webRequest hooks; no cosmetic preload/global IPC or popup policy. */
 export class BrowserBlocking {
+  private readonly directory: string;
+  private readonly changed: () => void;
+  private readonly fetchFilterList: FilterListFetch;
   private readonly settingsStore: JsonStore<Settings>;
   private settings: Settings;
   private engine?: ElectronBlocker;
@@ -21,7 +25,14 @@ export class BrowserBlocking {
   private sessions = new Map<Session, string>();
   private counts = new Map<string, number>();
   private disposed = false;
-  constructor(private readonly directory: string, private changed: () => void) {
+  constructor(
+    directory: string,
+    changed: () => void,
+    fetchFilterList: FilterListFetch,
+  ) {
+    this.directory = directory;
+    this.changed = changed;
+    this.fetchFilterList = fetchFilterList;
     this.settingsStore = new JsonStore(directory, "content-protection.json");
     const saved = this.settingsStore.read({});
     this.settings = saved && typeof saved === "object" && !Array.isArray(saved) ? saved : {};
@@ -48,6 +59,7 @@ export class BrowserBlocking {
     this.changed();
   }
   private async initialize(): Promise<void> {
+    if (this.disposed) return;
     const file = join(this.directory, "zenmium", "filter-cache", "ghostery-2.18.2-network.bin");
     try {
       const info = await stat(file);
@@ -58,31 +70,34 @@ export class BrowserBlocking {
       }
     } catch { /* First run or incompatible/corrupt cache. Fetch a verified filter list. */ }
     if (this.engine && Date.now() - (this.updatedAt ?? 0) < MAX_AGE) return;
-    try {
-      // Native fetch avoids another transport dependency. Public filter-list requests
-      // use no browser cookies, credentials, or Workspace session.
-      const engine = await ElectronBlocker.fromLists(
-        (input: string) => fetch(input, { credentials: "omit", signal: AbortSignal.timeout(15000) }),
-        LISTS,
-        { loadCosmeticFilters: false, loadExtendedSelectors: false, enableHtmlFiltering: false },
-      );
-      if (this.disposed) return;
-      this.engine = engine;
-      this.status = "active";
-      this.updatedAt = Date.now();
-      await mkdir(dirname(file), { recursive: true });
-      await writeFile(`${file}.tmp`, engine.serialize());
-      await rename(`${file}.tmp`, file);
-    } catch {
-      this.status = this.engine ? "cached" : "unavailable";
-      this.reason = this.engine ? "Using saved filter lists; the latest lists could not be downloaded." : "Filter lists are unavailable. Network ad/tracker protection is not active.";
-    }
+    // Chromium's network stack avoids Node's Undici transport. Public filter-list
+    // requests use no browser cookies, credentials, or Workspace session.
+    const engine = await ElectronBlocker.fromLists(
+      (input: string) => this.fetchFilterList(input, { credentials: "omit", signal: AbortSignal.timeout(15000) }),
+      LISTS,
+      { loadCosmeticFilters: false, loadExtendedSelectors: false, enableHtmlFiltering: false },
+    );
+    if (this.disposed) return;
+    this.engine = engine;
+    this.status = "active";
+    this.updatedAt = Date.now();
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(`${file}.tmp`, engine.serialize());
+    await rename(`${file}.tmp`, file);
   }
-  async attach(profileId: string, target: Session): Promise<void> {
+  private scheduleInitialize(): void {
+    this.loading ??= deferFilterListHydration(
+      () => this.initialize(),
+      () => {
+        this.status = this.engine ? "cached" : "unavailable";
+        this.reason = this.engine ? "Using saved filter lists; the latest lists could not be downloaded." : "Filter lists are unavailable. Network ad/tracker protection is not active.";
+      },
+    )
+      .finally(() => this.changed());
+  }
+  attach(profileId: string, target: Session): void {
     if (this.sessions.has(target)) return;
     this.sessions.set(target, profileId);
-    this.loading ??= this.initialize();
-    await this.loading;
     if (this.disposed) return;
     const bypass = (details: Electron.OnBeforeRequestListenerDetails | Electron.OnHeadersReceivedListenerDetails): boolean => {
       const prefs = this.preferences(profileId);
@@ -104,6 +119,8 @@ export class BrowserBlocking {
       if (bypass(details)) { callback({}); return; }
       this.engine!.onHeadersReceived(details, callback);
     });
+    // Start after session hooks exist so filter-list connectivity never delays first paint.
+    this.scheduleInitialize();
     this.changed();
   }
   dispose(): void {
