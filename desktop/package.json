@@ -2,7 +2,7 @@
   "name": "@zenmium/desktop",
   "productName": "Zenmium",
   "description": "Zenmium desktop browser",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "private": true,
   "type": "module",
   "main": "out/main/index.js",

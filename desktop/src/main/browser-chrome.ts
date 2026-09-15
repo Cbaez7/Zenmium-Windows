@@ -19,9 +19,10 @@ import { ARC_STATE_EVENT } from "../shared/ipc";
 import { ArcCore } from "./arc-core";
 import { JsonStore } from "./state-store";
 
-function updateBounds(view: WebContentsView, next: Electron.Rectangle): void {
+function updateBounds(view: WebContentsView, next: Electron.Rectangle, forceRepaint = false): void {
   const current = view.getBounds();
   if (
+    forceRepaint ||
     current.x !== next.x ||
     current.y !== next.y ||
     current.width !== next.width ||
@@ -29,6 +30,7 @@ function updateBounds(view: WebContentsView, next: Electron.Rectangle): void {
   ) {
     view.setBounds(next);
   }
+  if (forceRepaint && !view.webContents.isDestroyed()) view.webContents.invalidate();
 }
 
 const SIDEBAR_HOVER_EXIT_DELAY = 180;
@@ -50,6 +52,9 @@ export class BrowserChrome {
   private sidebarHoverExitTimer: ReturnType<typeof setTimeout> | null = null;
   private nativeCommand?: (command: string) => boolean;
   private humanInput?: (wc: Electron.WebContents) => void;
+  private readonly resizeListener = () => this.sync();
+  private readonly fullScreenListener = () => this.sync();
+  private readonly restoreListener = () => this.sync(true);
   setNativeCommandHandler(handler: (command: string) => boolean): void { this.nativeCommand = handler; }
   setHumanInputHandler(handler: (wc: Electron.WebContents) => void): void { this.humanInput = handler; }
   replaceChatHistory(entries: ChatHistoryEntry[]): void {
@@ -112,9 +117,15 @@ export class BrowserChrome {
     });
     this.themeListener = () => this.sync();
     nativeTheme.on("updated", this.themeListener);
-    win.on("resize", () => this.sync());
-    win.on("enter-full-screen", () => this.sync());
-    win.on("leave-full-screen", () => this.sync());
+    win.on("resize", this.resizeListener);
+    win.on("enter-full-screen", this.fullScreenListener);
+    win.on("leave-full-screen", this.fullScreenListener);
+    // Windows does not guarantee a resize event when a minimized window is restored.
+    // Force Chromium child views to repaint even if their rectangles are unchanged.
+    win.on("show", this.restoreListener);
+    win.on("restore", this.restoreListener);
+    win.on("maximize", this.restoreListener);
+    win.on("unmaximize", this.restoreListener);
     this.sync();
   }
   private createSurface(surface: string): WebContentsView {
@@ -276,7 +287,7 @@ export class BrowserChrome {
       wc.send(CHROME_IPC.commandEvent, "restore-focus");
     } else this.core.focusActive();
   }
-  private sync(): void {
+  private sync(forceRepaint = false): void {
     if (this.disposed || this.win.isDestroyed()) return;
     this.ui.dark =
       this.ui.preferences.theme === "system"
@@ -313,13 +324,13 @@ export class BrowserChrome {
     // Keep the sidebar renderer at its full native width even while it is
     // visually hidden below the page. A small native gutter surface owns the
     // hover boundary, so the full renderer never has to resize from 8px.
-    updateBounds(this.sidebarView, nativeSidebar);
-    updateBounds(this.gutterView, gutter);
+    updateBounds(this.sidebarView, nativeSidebar, forceRepaint);
+    updateBounds(this.gutterView, gutter, forceRepaint);
     updateBounds(this.overlayView, this.ui.overlay?.kind === "find" ? {
       x: Math.max(layout.content.x, layout.content.x + layout.content.width - 380), y: layout.content.y,
       width: Math.min(380, layout.content.width), height: Math.min(160, layout.content.height),
-    } : { height, width, x: 0, y: 0 });
-    this.core.setContentBounds(layout.content);
+    } : { height, width, x: 0, y: 0 }, forceRepaint);
+    this.core.setContentBounds(layout.content, forceRepaint);
     this.core.setPeekBounds(glanceLayout(width, height).page);
     this.raise();
     // The renderer owns a persistent, accessible traffic-light strip inside the sidebar.
@@ -503,6 +514,13 @@ export class BrowserChrome {
     }
     this.unsubscribe();
     nativeTheme.off("updated", this.themeListener);
+    this.win.off("resize", this.resizeListener);
+    this.win.off("enter-full-screen", this.fullScreenListener);
+    this.win.off("leave-full-screen", this.fullScreenListener);
+    this.win.off("show", this.restoreListener);
+    this.win.off("restore", this.restoreListener);
+    this.win.off("maximize", this.restoreListener);
+    this.win.off("unmaximize", this.restoreListener);
     for (const view of [this.sidebarView, this.overlayView, this.gutterView])
       if (!view.webContents.isDestroyed()) view.webContents.close();
   }

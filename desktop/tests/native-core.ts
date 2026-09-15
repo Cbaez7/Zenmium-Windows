@@ -14,6 +14,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { DownloadItem, WebContents } from "electron";
 import { app, BrowserWindow, session, WebContentsView } from "electron";
 import { ArcCore } from "../src/main/arc-core.ts";
+import { BrowserChrome } from "../src/main/browser-chrome.ts";
 import { BrowserDownloads } from "../src/main/browser-downloads.ts";
 import type { DownloadRecord } from "../src/shared/browser-ui.ts";
 import type { ArcState, Tab } from "../src/shared/ipc.ts";
@@ -1085,6 +1086,46 @@ const cases: NativeCase[] = [
       assert.deepEqual(getPaneTabIds(core.snapshot()), [b.id, other.id]);
       assert.deepEqual(right.getBounds(), originalBounds[0]);
       assert.equal(win.isVisible(), false);
+    },
+  },
+  {
+    name: "Windows restore repaints native pages and chrome when bounds are unchanged",
+    async run({ core, win, directory }, url) {
+      const page = await open(core, url("/page/restore"));
+      const chrome = new BrowserChrome(win, core, directory);
+      const view = attached(win).find((entry) => entry.webContents === page.wc)!;
+      const originalBounds = view.getBounds();
+      const setBounds = view.setBounds;
+      const invalidate = page.wc.invalidate;
+      let resizes = 0;
+      let repaints = 0;
+      view.setBounds = (bounds) => {
+        resizes++;
+        setBounds.call(view, bounds);
+      };
+      page.wc.invalidate = () => {
+        repaints++;
+        invalidate.call(page.wc);
+      };
+      const setContentBounds = core.setContentBounds.bind(core);
+      let restoreRefreshes = 0;
+      core.setContentBounds = (bounds, forceRepaint = false) => {
+        if (forceRepaint) restoreRefreshes++;
+        setContentBounds(bounds, forceRepaint);
+      };
+      try {
+        win.emit("restore");
+        assert.equal(restoreRefreshes, 1, "restore must force a native surface refresh");
+        assert.equal(resizes, 1, "active page bounds are re-applied after restore");
+        assert.equal(repaints, 1, "active page is invalidated after restore");
+        assert.deepEqual(view.getBounds(), originalBounds);
+        assert.ok(win.contentView.children.includes(view), "restored page remains attached");
+      } finally {
+        core.setContentBounds = setContentBounds;
+        page.wc.invalidate = invalidate;
+        view.setBounds = setBounds;
+        chrome.dispose();
+      }
     },
   },
   {

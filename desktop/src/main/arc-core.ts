@@ -559,7 +559,7 @@ export class ArcCore {
     this.loadTab(tab, view, tab.url);
     return view;
   }
-  private attachActive(): void {
+  private attachActive(forceRepaint = false): void {
     if (this.win.isDestroyed()) return;
     const wanted = getPaneTabIds(this.state);
     const rects = this.splitRects(wanted.length === 2);
@@ -575,10 +575,11 @@ export class ArcCore {
       const tab = this.tab(tabId);
       if (!tab || tab.url === "about:blank" || tab.error) return;
       const view = this.ensureView(tab);
-      if (!sameBounds(view.getBounds(), rects[index]!))
+      if (forceRepaint || !sameBounds(view.getBounds(), rects[index]!))
         view.setBounds(rects[index]!);
       if (!this.win.contentView.children.includes(view))
         this.win.contentView.addChildView(view);
+      if (forceRepaint && !view.webContents.isDestroyed()) view.webContents.invalidate();
     });
     this.raiseChrome();
   }
@@ -592,10 +593,10 @@ export class ArcCore {
       { height, width: width - half - gap, x: x + half + gap, y },
     ];
   }
-  setContentBounds(rect: Rect): void {
-    if (sameBounds(this.bounds, rect)) return;
+  setContentBounds(rect: Rect, forceRepaint = false): void {
+    if (!forceRepaint && sameBounds(this.bounds, rect)) return;
     this.bounds = rect;
-    this.attachActive();
+    this.attachActive(forceRepaint);
   }
   focusActive(): void {
     if (this.disposed || this.win.isDestroyed()) return;
